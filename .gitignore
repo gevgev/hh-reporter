@@ -1,0 +1,12 @@
+*.txt
+*.log
+*.zip
+tmp/
+hh-reporter
+test/*.*
+event/
+*.cod
+*.cod.bz2
+*.bak
+cdw-data-reports/
+test-array.sh
