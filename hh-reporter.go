@@ -44,6 +44,10 @@ var (
 
 	verbose bool
 	appName string
+
+	failedFilesChan chan string
+	MSOLookup       map[string]string
+	msoList         []MsoType
 )
 
 func init() {
@@ -102,8 +106,10 @@ type MsoType struct {
 	Name string
 }
 
-func getMsoNamesList() []MsoType {
+// Read the list of MSO's and initialize the lookup map and array
+func getMsoNamesList() ([]MsoType, map[string]string) {
 	msoList := []MsoType{}
+	msoLookup := make(map[string]string)
 
 	msoFile, err := os.Open(msoListFilename)
 	if err != nil {
@@ -118,20 +124,17 @@ func getMsoNamesList() []MsoType {
 
 	for _, record := range records {
 		msoList = append(msoList, MsoType{record[0], record[1]})
+		msoLookup[record[0]] = record[1]
 	}
-	return msoList
+	return msoList, MSOLookup
 }
 
+// path per mso
 func formatPrefix(path, msoCode string) string {
 	return fmt.Sprintf("%s/%s/delta/", path, msoCode)
 }
 
-var (
-	failedFilesChan         chan string
-	downloadedReportChannel chan bool
-	dwnldMu                 sync.Mutex
-)
-
+// converts/breaks the "20160601" string into yy, mm, dd
 func convertToDateParts(dtStr string) (yy, mm, dd int) {
 	yy, mm, dd = 0, 0, 0
 	i, err := strconv.Atoi(dtStr[:4])
@@ -154,6 +157,7 @@ func convertToDateParts(dtStr string) (yy, mm, dd int) {
 	return yy, mm, dd
 }
 
+// a list of strings for each date in range to lookup
 func getDateRangeRegEx(dateFrom, dateTo string) []string {
 
 	regExpStr := []string{}
@@ -192,15 +196,15 @@ func printRangeString(dateRangeRegexStr []string) {
 		log.Println(str)
 	}
 }
+
 func main() {
 	startTime := time.Now()
-	downloaded := 0
 
 	// This is our semaphore/pool
 	sem := make(chan bool, concurrency)
-	downloadedReportChannel = make(chan bool)
+	failedFilesChan = make(chan string)
 
-	msoList := getMsoNamesList()
+	msoList, MSOLookup = getMsoNamesList()
 
 	if verbose {
 		PrintParams()
@@ -217,20 +221,6 @@ func main() {
 			key, more := <-failedFilesChan
 			if more {
 				failedFilesList = append(failedFilesList, key)
-			} else {
-				return
-			}
-		}
-	}()
-
-	// listening to succeeded reports
-	go func() {
-		for {
-			_, more := <-downloadedReportChannel
-			if more {
-				dwnldMu.Lock()
-				downloaded++
-				dwnldMu.Unlock()
 			} else {
 				return
 			}
@@ -258,16 +248,21 @@ func main() {
 	log.Println("Number of objects: ", len(resp.Contents))
 	for _, key := range resp.Contents {
 		// iterate through the list to match the dates range/mso name
-		// using the constracted below regex
+		// using the constracted below lookup string
 
-		log.Println("Key: ", *key.Key)
+		if verbose {
+			log.Println("Key: ", *key.Key)
+		}
 
 		for _, mso := range msoList {
 
 			for _, eachDate := range dateRangeRegexStr {
 				// cdw-data-reports/20160601/ Armstrong-Butler/hhid_count- Armstrong-Butler-20160601.csv
 				lookupKey := fmt.Sprintf("%s-%s.csv", mso.Name, eachDate)
-				log.Println("Lookup key: ", lookupKey)
+
+				if verbose {
+					log.Println("Lookup key: ", lookupKey)
+				}
 
 				if strings.Contains(*key.Key, lookupKey) {
 					// download the file (add to a queue of downloads)
@@ -284,7 +279,8 @@ func main() {
 
 		}
 	}
-	// aggregate the counts and generate the aggregated report
+
+	// Now aggregate the counts and generate the aggregated report
 	// save the report csv?
 
 	// Reports
@@ -300,13 +296,154 @@ func main() {
 	if verbose {
 		log.Println("All download jobs completed, closing failed/succeeded jobs channel")
 	}
+
 	close(failedFilesChan)
-	close(downloadedReportChannel)
 	ReportFailedFiles(failedFilesList)
-	dwnldMu.Lock()
-	downloadedVal := downloaded
-	dwnldMu.Unlock()
-	log.Printf("Processed %d MSO's, %d files, in %v\n", len(msoList), downloadedVal, time.Since(startTime))
+
+	log.Println("Starting reading/aggregating the results")
+
+	fileList := []string{}
+	err = filepath.Walk("cdw-data-reports/", func(path string, f os.FileInfo, err error) error {
+		fileList = append(fileList, path)
+		return nil
+	})
+
+	if err != nil {
+		log.Fatalln("Error walking the provided path: ", err)
+	}
+
+	var report ReportEntryList
+
+	for _, file := range fileList {
+		if isFileToPush(file) {
+			if verbose {
+				log.Println("Reading: ", file)
+			}
+			hhcounts := ReadHHCount(file)
+			ss := ReportedEntry(hhcounts)
+			report = append(report, ss...)
+		}
+	}
+
+	PrintFinalReport(report)
+	log.Printf("Processed %d MSO's, %d days, in %v\n", len(msoList), len(dateRangeRegexStr), time.Since(startTime))
+}
+
+func formatReportFilename(fileName string) string {
+	return fmt.Sprintf("%s-%s-%s.csv", fileName, dateFrom, dateTo)
+}
+
+func PrintFinalReport(report ReportEntryList) {
+	log.Println("Aggregated final:")
+
+	reportFileName := formatReportFilename("hh-report")
+	out, err := os.Create(reportFileName)
+	if err != nil {
+		panic(err)
+	}
+
+	defer out.Close()
+
+	writer := csv.NewWriter(out)
+
+	writer.WriteAll(report.Convert())
+
+	if err := writer.Error(); err != nil {
+		log.Fatalln("error writing csv:", err)
+	}
+
+	log.Println("Saved the report in file: ", reportFileName)
+
+	if verbose {
+		for _, entry := range report {
+			log.Println(entry)
+		}
+	}
+}
+
+// convert aws reported hh count into aggregated report entry
+func ReportedEntry(hhcounts []HH_entry) []ReportEntry {
+	reported := []ReportEntry{}
+
+	for _, hh := range hhcounts {
+		reported = append(reported,
+			ReportEntry{
+				hh.date,
+				hh.provider_code,
+				MSOLookup[hh.provider_code],
+				hh.hh_id_count,
+			})
+	}
+	return reported
+}
+
+//aws reported entry
+type HH_entry struct {
+	date          string
+	provider_code string
+	hh_id_count   string
+}
+
+//aggregated reported entry
+type ReportEntry struct {
+	Date     string
+	Id       string
+	Name     string
+	HH_Count string
+}
+
+type ReportEntryList []ReportEntry
+
+// convert []ReportEntry into [][]string for csv file
+func (report ReportEntryList) Convert() [][]string {
+	header := []string{"Date", "Mso Id", "Mso Name", "hh count"}
+	bodyAll := [][]string{}
+
+	bodyAll = append(bodyAll, header)
+
+	for _, entry := range report {
+		bodyAll = append(bodyAll, []string{FormatDate(entry.Date), entry.Id, entry.Name, entry.HH_Count})
+	}
+	return bodyAll
+}
+
+// add slashes
+//"0123 45 67"
+//"2016 06 01"
+//"2016/06/01"
+func FormatDate(dt string) string {
+	//"0123 45 67"
+	//"2016 06 01"
+	return fmt.Sprintf("%s/%s/%s", dt[:4], dt[4:6], dt[6:])
+}
+
+// Read hh count from a single file
+func ReadHHCount(fileName string) []HH_entry {
+	hhCounts := []HH_entry{}
+
+	hhFile, err := os.Open(fileName)
+	if err != nil {
+		log.Fatalf("Could not open Mso List file: %s, Error: %s\n", fileName, err)
+	}
+
+	r := csv.NewReader(hhFile)
+	records, err := r.ReadAll()
+	if err != nil {
+		log.Fatalf("Could not read hh count file: %s, Error: %s\n", fileName, err)
+	}
+
+	for i, record := range records {
+		// Skipping the first line - header
+		if i > 0 {
+			hhCounts = append(hhCounts, HH_entry{record[0], record[1], record[2]})
+		}
+	}
+	return hhCounts
+
+}
+
+func isFileToPush(fileName string) bool {
+	return filepath.Ext(fileName) == ".csv"
 }
 
 func ReportFailedFiles(failedFilesList []string) {
@@ -319,15 +456,17 @@ func ReportFailedFiles(failedFilesList []string) {
 	}
 }
 
+// downloading aws report entries
 func processSingleDownload(key string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for i := 0; i < maxAttempts; i++ {
-		log.Println("Downloading: ", key)
+		if verbose {
+			log.Println("Downloading: ", key)
+		}
 		if downloadFile(key) {
 			if verbose {
 				log.Println("Successfully downloaded: ", key)
 			}
-			downloadedReportChannel <- true
 			return
 		} else {
 			if verbose {
@@ -373,6 +512,8 @@ func downloadFile(filename string) bool {
 		return false
 	}
 
-	log.Println("Downloaded file ", file.Name(), numBytes, " bytes")
+	if verbose {
+		log.Println("Downloaded file ", file.Name(), numBytes, " bytes")
+	}
 	return true
 }
