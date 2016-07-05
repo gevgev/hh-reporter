@@ -59,11 +59,18 @@ func init() {
 	flagMsoFileName := flag.String("m", "mso-list.csv", "Filename for `MSO` list")
 	flagMaxAttempts := flag.Int("M", MAXATTEMPTS, "`Max attempts` to retry download from aws.s3")
 	flagConcurrency := flag.Int("c", 10, "The number of files to process `concurrent`ly")
+	flagHelp := flag.Bool("h", false, "Help")
 
 	flagVerbose := flag.Bool("v", true, "`Verbose`: outputs to the screen")
 
 	flag.Parse()
 	if flag.Parsed() {
+		appName = os.Args[0]
+
+		if *flagHelp {
+			usage()
+		}
+
 		regionName = *flagRegion
 		bucketName = *flagBucket
 		dateFrom = formatDate(*flagDateFrom)
@@ -73,7 +80,6 @@ func init() {
 		concurrency = *flagConcurrency
 
 		verbose = *flagVerbose
-		appName = os.Args[0]
 	} else {
 		usage()
 	}
@@ -117,6 +123,8 @@ func getMsoNamesList() ([]MsoType, map[string]string) {
 	}
 
 	r := csv.NewReader(msoFile)
+	r.TrimLeadingSpace = true
+
 	records, err := r.ReadAll()
 	if err != nil {
 		log.Fatalf("Could not read MSO file: %s, Error: %s\n", msoListFilename, err)
@@ -126,7 +134,7 @@ func getMsoNamesList() ([]MsoType, map[string]string) {
 		msoList = append(msoList, MsoType{record[0], record[1]})
 		msoLookup[record[0]] = record[1]
 	}
-	return msoList, MSOLookup
+	return msoList, msoLookup
 }
 
 // path per mso
