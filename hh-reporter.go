@@ -145,19 +145,31 @@ func formatPrefix(path, msoCode string) string {
 // converts/breaks the "20160601" string into yy, mm, dd
 func convertToDateParts(dtStr string) (yy, mm, dd int) {
 	yy, mm, dd = 0, 0, 0
+	// 01234567
+	//'20160630'
+
 	i, err := strconv.Atoi(dtStr[:4])
+	if verbose {
+		log.Printf("yyyy: Provided: %s, converted: %d:", dtStr[:4], i)
+	}
 	if err != nil {
 		return yy, mm, dd
 	}
 	yy = i
 
 	i, err = strconv.Atoi(dtStr[4:6])
+	if verbose {
+		log.Printf("mm: Provided: %s, converted: %d:", dtStr[4:6], i)
+	}
 	if err != nil {
 		return yy, mm, dd
 	}
 	mm = i
 
-	i, err = strconv.Atoi(dtStr[7:])
+	i, err = strconv.Atoi(dtStr[6:])
+	if verbose {
+		log.Printf("dd: Provided: %s, converted: %d:", dtStr[6:], i)
+	}
 	if err != nil {
 		return yy, mm, dd
 	}
